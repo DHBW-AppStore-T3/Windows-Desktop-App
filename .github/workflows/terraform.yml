@@ -56,3 +56,9 @@ jobs:
       uses: aquasecurity/tfsec-action@v1.0.3
       with:
         working_directory: terraform
+        # The action downloads the tfsec release through the GitHub API,
+        # and unauthenticated requests share one IP-based rate limit
+        # across all hosted runners. Without a token this fails at random
+        # with a 403 - the same commit passed on one run and failed on
+        # another. Same fix already applied to packer init.
+        github_token: ${{ secrets.GITHUB_TOKEN }}
