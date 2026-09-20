@@ -225,23 +225,66 @@ if ($globalV6) {
 }
 
 # --- 3d. RDP certificate ----------------------------------------------
-# RDP presents a self-signed certificate, so a trust warning is normal
-# without a PKI. The NAME on it was not: it read DESKTOP-TBBP874, the
-# machine name from Packer build time. The certificate is generated once
-# and then baked into the image, and sysprep does not regenerate it - so
-# every desktop cloned from that image presented the same stale name.
+# RDP's certificate is self-signed, so a trust warning is unavoidable
+# without a PKI. The NAME on it is what matters: it is the only check a
+# student can actually make, and it was showing a machine name from
+# Packer build time.
 #
-# Beyond looking alarming, it defeats the one check a student could
-# actually make: the name in the warning should be their own machine.
-# Delete it and let TermService issue a fresh one for the real hostname.
-try {
+# Clearing it here was not enough. The regenerated certificate still
+# carried a sysprep DESKTOP-* name, because cloudbase-init's
+# SetHostNamePlugin defers the rename to a reboot - so at the moment
+# this script runs the machine may not yet be called win11-*.
+#
+# Handled both ways: fix it now if the name is already final, and leave
+# a run-once startup task that re-checks after the pending reboot and
+# then removes itself.
+
+Note "hostname at bootstrap=$env:COMPUTERNAME"
+
+function Reset-RdpCertificate {
     Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-        -Name 'SSLCertificateSHA1Hash' -ErrorAction SilentlyContinue
-    Restart-Service TermService -Force -ErrorAction Stop
-    Note "rdp certificate cleared, TermService restarted for regeneration"
+    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash' -ErrorAction SilentlyContinue
+    Restart-Service TermService -Force -ErrorAction SilentlyContinue
+}
+
+try {
+    Reset-RdpCertificate
+    Start-Sleep -Seconds 5
+    $newCert = Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($newCert) {
+        Note "rdp certificate subject=$($newCert.Subject)"
+    } else {
+        Note "rdp certificate not yet regenerated (TermService will issue one on demand)"
+    }
 } catch { Note "rdp certificate reset failed: $($_.Exception.Message)" }
+
+# Run-once startup task. Fires after the rename has taken effect, fixes
+# the certificate only if the subject does not match the final hostname,
+# then unregisters itself so it never runs on a student's machine twice.
+try {
+    $fixDir = 'C:\ProgramData\AppStore'
+    New-Item -ItemType Directory -Path $fixDir -Force | Out-Null
+    $fixPath = Join-Path $fixDir 'rdp-cert-fix.ps1'
+    $fixBody = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$cert = Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' | Select-Object -First 1
+if (-not `$cert -or `$cert.Subject -notlike "*`$env:COMPUTERNAME*") {
+    Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' | Remove-Item -Force
+    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash'
+    Restart-Service TermService -Force
+}
+Unregister-ScheduledTask -TaskName 'AppStore-RdpCertFix' -Confirm:`$false
+"@
+    Set-Content -Path $fixPath -Value $fixBody -Encoding UTF8
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$fixPath`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    Register-ScheduledTask -TaskName 'AppStore-RdpCertFix' -Action $action `
+        -Trigger $trigger -Principal $principal -Force | Out-Null
+    Note "rdp certificate run-once startup task registered"
+} catch { Note "rdp cert startup task failed: $($_.Exception.Message)" }
 
 # --- 4. Windows activation -------------------------------------------
 # Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
