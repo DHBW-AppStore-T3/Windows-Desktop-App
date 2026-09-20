@@ -102,9 +102,20 @@ resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
 
 # Egress allow-list. Ports chosen so Windows Update (80/443), DNS,
 # NTP and KMS (1688) work while SSH/SMB/WinRM to neighbours do not.
+#
+# delete_default_rules removed the blanket allow-all, which means this
+# list has to carry the NETWORK layer as well, not just applications.
+# Leaving those out cost a full deploy: the guest never completed
+# address configuration, so cloudbase-init could not reach the metadata
+# service at 169.254.169.254, never fetched its user_data, and the VM
+# came up with no user and no RDP - while Nova happily reported ACTIVE.
 locals {
   egress_tcp = [53, 80, 443, 1688]
-  egress_udp = [53, 123]
+
+  # 53 DNS, 123 NTP, plus DHCP. Without DHCP the guest has no address
+  # and nothing above it works at all.
+  egress_udp_v4 = [53, 123, 67, 68]
+  egress_udp_v6 = [53, 123, 546, 547]
 }
 
 resource "openstack_networking_secgroup_rule_v2" "egress_tcp" {
@@ -118,7 +129,7 @@ resource "openstack_networking_secgroup_rule_v2" "egress_tcp" {
 }
 
 resource "openstack_networking_secgroup_rule_v2" "egress_udp" {
-  for_each          = toset([for p in local.egress_udp : tostring(p)])
+  for_each          = toset([for p in local.egress_udp_v6 : tostring(p)])
   direction         = "egress"
   ethertype         = "IPv6"
   protocol          = "udp"
@@ -129,6 +140,17 @@ resource "openstack_networking_secgroup_rule_v2" "egress_udp" {
 
 # IPv4 egress too — the NAT subnet carries the metadata service and
 # some update endpoints still resolve to A records.
+# Neighbour Discovery. ICMPv6 is not a diagnostic nicety like ping over
+# IPv4 - it is how IPv6 resolves link-layer addresses and finds its
+# router. Without it the VM has no working IPv6 at all, and IPv6 is the
+# only way a student can reach RDP on this cloud.
+resource "openstack_networking_secgroup_rule_v2" "egress_icmpv6" {
+  direction         = "egress"
+  ethertype         = "IPv6"
+  protocol          = "ipv6-icmp"
+  security_group_id = openstack_networking_secgroup_v2.win.id
+}
+
 resource "openstack_networking_secgroup_rule_v2" "egress_tcp_v4" {
   for_each          = toset([for p in local.egress_tcp : tostring(p)])
   direction         = "egress"
@@ -140,7 +162,7 @@ resource "openstack_networking_secgroup_rule_v2" "egress_tcp_v4" {
 }
 
 resource "openstack_networking_secgroup_rule_v2" "egress_udp_v4" {
-  for_each          = toset([for p in local.egress_udp : tostring(p)])
+  for_each          = toset([for p in local.egress_udp_v4 : tostring(p)])
   direction         = "egress"
   ethertype         = "IPv4"
   protocol          = "udp"
