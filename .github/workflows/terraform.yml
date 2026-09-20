@@ -39,6 +39,14 @@ jobs:
       run: terraform validate
       working-directory: terraform
 
+    # The readiness gate is a Python script run by a local-exec
+    # provisioner, so `terraform validate` cannot see inside it. Compile
+    # it here - a syntax error would otherwise first surface mid-deploy,
+    # after a VM has already been built and paid for.
+    - name: Check readiness script
+      run: python3 -m py_compile wait_for_bootstrap.py
+      working-directory: terraform
+
     - name: Setup TFLint
       uses: terraform-linters/setup-tflint@v4
       with:
