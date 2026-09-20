@@ -29,6 +29,27 @@ try {
     Write-Output "could not set network profile: $($_.Exception.Message)"
 }
 
+# Windows applies UAC remote token filtering to LOCAL accounts: over the
+# network, a local administrator that is not the built-in Administrator
+# gets a filtered token and WinRM answers 401. The built-in account is
+# exempt - but it is disabled in this image, which is why we create our
+# own admin, and therefore why we land squarely in the restriction.
+#
+# This is the documented requirement for driving Windows with Packer via
+# a local account. sysprep.ps1 removes it again so the setting never
+# reaches a student desktop.
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+    -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force | Out-Null
+Write-Output "LocalAccountTokenFilterPolicy=1"
+
+# Belt and braces: WinRM also honours this group directly.
+try {
+    Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-580').Name -Member $u -ErrorAction Stop
+    Write-Output "added to Remote Management Users"
+} catch {
+    Write-Output "Remote Management Users: $($_.Exception.Message)"
+}
+
 Set-Service -Name WinRM -StartupType Automatic
 Start-Service -Name WinRM
 
@@ -40,6 +61,10 @@ Start-Service -Name WinRM
 Write-Output "winrm auth Basic exit=$LASTEXITCODE"
 & winrm set winrm/config/service '@{AllowUnencrypted="false"}' | Out-Null
 Write-Output "winrm AllowUnencrypted exit=$LASTEXITCODE"
+
+# If this ever 401s again, the console log should say which auth schemes
+# the service actually accepts instead of leaving us to guess.
+& winrm get winrm/config/service/auth 2>&1 | ForEach-Object { Write-Output "authcfg: $_" }
 
 if (-not (Get-NetFirewallRule -Name 'Packer-WinRM-HTTPS' -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -Name 'Packer-WinRM-HTTPS' -DisplayName 'Packer WinRM HTTPS' `
