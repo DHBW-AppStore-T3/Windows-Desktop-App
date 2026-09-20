@@ -1,0 +1,17 @@
+# Terraform files
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
+
+# Packer files
+packer_cache/
+*.box
+*.pkrvars.hcl
+
+# Local clouds.yaml must never be committed
+clouds.yaml
+
+# OS files
+.DS_Store

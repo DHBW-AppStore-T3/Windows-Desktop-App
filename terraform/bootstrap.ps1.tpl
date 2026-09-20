@@ -1,0 +1,141 @@
+#ps1_sysnative
+# Runs once as SYSTEM via cloudbase-init's UserDataPlugin.
+#
+# NOTE ON TEMPLATING: this file goes through Terraform's templatefile().
+# "$" followed by "{" and "%" followed by "{" are Terraform syntax, so
+# PowerShell's dollar-brace form and the percent-brace ForEach-Object
+# alias must NOT appear anywhere below -- Terraform would try to
+# interpret them even inside a PowerShell comment. Plain $var and
+# $($expr) are fine.
+#
+# NOTE ON SECRETS: user_data is readable by any process on the instance
+# via the metadata service and the config drive — that is inherent to
+# OpenStack. It is tolerable only because one VM serves exactly one
+# student, so the only password here is that student's own. Never put a
+# shared secret in this file.
+
+$ErrorActionPreference = 'Continue'
+$log = 'C:\appstore-bootstrap.log'
+function Note($msg) {
+    $line = "[$(Get-Date -Format o)] $msg"
+    # stdout as well as the file: cloudbase-init copies it into the Nova
+    # console log, which is readable with `openstack console log show`
+    # even when nothing else about the VM is reachable.
+    Write-Output "@@BOOTSTRAP $msg"
+    Add-Content -Path $log -Value $line -ErrorAction SilentlyContinue
+}
+
+Note "start user=${username}"
+
+$user     = '${username}'
+$pass     = '${password}'
+$isAdmin  = ('${is_admin}' -eq 'true')
+$kmsHost  = '${kms_host}'
+$fullName = '${displayname}'
+
+# --- 1. Local account -------------------------------------------------
+# The image ships with the built-in Administrator DISABLED (confirmed on
+# the DHBW base image: cloudbase-init's CreateUserPlugin fails with
+# "Das Konto ist momentan deaktiviert"). We therefore create our own
+# account and leave Administrator disabled.
+try {
+    $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+    if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+        Set-LocalUser -Name $user -Password $sec
+        Note "user exists, password reset"
+    } else {
+        New-LocalUser -Name $user -Password $sec -FullName $fullName `
+            -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+        Note "user created"
+    }
+} catch { Note "ERROR user: $($_.Exception.Message)" }
+
+# Groups are resolved by well-known SID, never by name: the image is
+# German, where these are "Remotedesktopbenutzer" and "Administratoren".
+try {
+    $rdpGroup = (Get-LocalGroup -SID 'S-1-5-32-555').Name
+    Add-LocalGroupMember -Group $rdpGroup -Member $user -ErrorAction Stop
+    Note "added to RDP group '$rdpGroup'"
+} catch { Note "ERROR rdpgroup: $($_.Exception.Message)" }
+
+if ($isAdmin) {
+    try {
+        $adminGroup = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+        Add-LocalGroupMember -Group $adminGroup -Member $user -ErrorAction Stop
+        Note "added to admin group '$adminGroup'"
+    } catch { Note "ERROR admingroup: $($_.Exception.Message)" }
+} else {
+    Note "student is NOT local admin (student_is_admin=false)"
+}
+
+# --- 2. Account lockout ----------------------------------------------
+# RDP with password auth is a brute-force target even behind a scoped
+# security group. 10 tries / 15 min observation, 15 min lockout.
+try {
+    & net accounts /lockoutthreshold:10 /lockoutduration:15 /lockoutwindow:15 | Out-Null
+    Note "lockout policy set"
+} catch { Note "ERROR lockout: $($_.Exception.Message)" }
+
+# --- 3. Enable RDP ----------------------------------------------------
+try {
+    Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+        -Name fDenyTSConnections -Value 0 -ErrorAction Stop
+    Note "fDenyTSConnections=0"
+} catch { Note "ERROR fDeny: $($_.Exception.Message)" }
+
+# NLA on: unauthenticated clients never reach the full RDP stack.
+try {
+    Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+        -Name UserAuthentication -Value 1 -ErrorAction Stop
+    Note "NLA=1"
+} catch { Note "ERROR nla: $($_.Exception.Message)" }
+
+# An explicit rule rather than `Enable-NetFirewallRule -DisplayGroup
+# 'Remote Desktop'`: that group name is localised ("Remotedesktop") and
+# the English form silently matches nothing on this image.
+try {
+    if (-not (Get-NetFirewallRule -Name 'AppStore-RDP-In' -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -Name 'AppStore-RDP-In' -DisplayName 'AppStore RDP (TCP 3389)' `
+            -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow `
+            -Profile Any -Enabled True -ErrorAction Stop | Out-Null
+    }
+    Note "firewall rule created"
+} catch { Note "ERROR fwrule: $($_.Exception.Message)" }
+
+# Belt and braces: also enable whatever built-in RDP rules exist,
+# matched by SID-independent group substring in either language.
+try {
+    Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayGroup -match 'Remotedesktop|Remote Desktop' } |
+        Enable-NetFirewallRule -ErrorAction SilentlyContinue
+    Note "builtin RDP rules enabled"
+} catch { Note "ERROR fwgroup: $($_.Exception.Message)" }
+
+# The registry flag alone does not bind the listener if TermService is
+# not running.
+try {
+    Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop
+    Start-Service -Name TermService -ErrorAction SilentlyContinue
+    $svc = Get-Service TermService
+    Note "TermService $($svc.Status)/$($svc.StartType)"
+} catch { Note "ERROR termservice: $($_.Exception.Message)" }
+
+# --- 4. Windows activation -------------------------------------------
+# Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
+# found either via DNS SRV (_vlmcs._tcp) or set explicitly here.
+try {
+    if ($kmsHost -ne '') {
+        & cscript.exe //nologo "$env:SystemRoot\System32\slmgr.vbs" /skms $kmsHost | Out-Null
+        Note "KMS host set to $kmsHost"
+    }
+    & cscript.exe //nologo "$env:SystemRoot\System32\slmgr.vbs" /ato | Out-Null
+    Note "activation attempted"
+} catch { Note "ERROR activation: $($_.Exception.Message)" }
+
+# --- 5. Report listening state ---------------------------------------
+try {
+    $listening = Get-NetTCPConnection -State Listen -LocalPort 3389 -ErrorAction SilentlyContinue
+    if ($listening) { Note "RDP LISTENING ok" } else { Note "WARN: 3389 not listening yet" }
+} catch { Note "ERROR listen-check: $($_.Exception.Message)" }
+
+Note "done"

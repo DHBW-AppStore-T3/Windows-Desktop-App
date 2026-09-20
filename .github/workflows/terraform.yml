@@ -1,0 +1,57 @@
+name: 'Terraform'
+
+on:
+  push:
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      run: terraform init -backend=false
+      working-directory: terraform
+
+    - name: Terraform Format
+      run: terraform fmt -check
+      working-directory: terraform
+
+    - name: Terraform Validate
+      run: terraform validate
+      working-directory: terraform
+
+    - name: Setup TFLint
+      uses: terraform-linters/setup-tflint@v4
+      with:
+        tflint_version: latest
+
+    - name: Init TFLint
+      run: tflint --init
+      working-directory: terraform
+
+    - name: Run TFLint
+      run: tflint --recursive
+      working-directory: terraform
+
+    - name: Run tfsec
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: terraform

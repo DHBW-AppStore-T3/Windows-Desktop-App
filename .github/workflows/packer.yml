@@ -1,0 +1,42 @@
+# Packer checks for the Windows desktop image.
+#
+# Only `init` and `fmt -check` run here: `packer validate` needs a
+# clouds.yaml to load the OpenStack builder config, and CI has no
+# OpenStack credentials. Validation happens on the AppStore worker,
+# which writes a per-task clouds.yaml before building.
+
+name: 'Packer'
+
+on:
+  push:
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  packer:
+    name: 'Packer'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup `packer` (local action)
+      uses: ./.github/actions
+      with:
+        version: '1.11.2'
+
+    - name: Packer Init
+      run: packer init packer
+
+    - name: Packer Format
+      run: packer fmt -check packer
