@@ -129,6 +129,32 @@ resource "openstack_networking_secgroup_rule_v2" "icmpv6_in" {
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
 
+# DHCPv6 reply path. The client solicits from its link-local to
+# ff02::1:2 on port 547 (permitted by the egress list), and the server
+# answers from ITS link-local to the client on port 546. Nothing in this
+# group admitted that reply, so the guest solicited forever and came up
+# with only a link-local address - which looks exactly like a firewall
+# blocking RDP, because packets to the global address never arrive at
+# all. Three rounds were spent on the wrong layer because of it.
+#
+# The guest confirmed the diagnosis itself: dhcp=Enabled, renew6 exit=0,
+# no address. It was asking; nothing was answering.
+#
+# Unscoped like the ICMPv6 rule, and for the same reason: a DHCPv6
+# client port is not meaningful attack surface, and twice now a
+# hand-derived "tighter" prefix has silently broken address
+# configuration. TCP is where the exposure is, and 3389 stays scoped.
+resource "openstack_networking_secgroup_rule_v2" "dhcpv6_in" {
+  direction      = "ingress"
+  ethertype      = "IPv6"
+  protocol       = "udp"
+  port_range_min = 546
+  port_range_max = 546
+  #tfsec:ignore:openstack-networking-no-public-ingress
+  remote_ip_prefix  = "::/0"
+  security_group_id = openstack_networking_secgroup_v2.win.id
+}
+
 # Egress allow-list. Ports chosen so Windows Update (80/443), DNS,
 # NTP and KMS (1688) work while SSH/SMB/WinRM to neighbours do not.
 #

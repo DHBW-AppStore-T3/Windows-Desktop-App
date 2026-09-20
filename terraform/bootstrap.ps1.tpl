@@ -187,8 +187,12 @@ try {
         Note "ipv6 iface-state $($i.InterfaceAlias) dhcp=$($i.Dhcp) ra=$($i.RouterDiscovery)"
     }
 
-    & netsh interface ipv6 set interface "$ifAlias" managedaddress=enabled otherstateful=enabled | Out-Null
-    Note "ipv6 managedaddress/otherstateful forced exit=$LASTEXITCODE"
+    # Kept only as a belt-and-braces nudge. The premise behind adding it
+    # was wrong: the interface already reports dhcp=Enabled, so Windows
+    # was soliciting all along - the replies were being dropped. It also
+    # returned exit=1 in practice, so nothing here may depend on it.
+    & netsh interface ipv6 set interface "$ifAlias" managedaddress=enabled otherstateful=enabled 2>&1 | Out-Null
+    Note "ipv6 managedaddress nudge exit=$LASTEXITCODE (advisory only)"
     & ipconfig /renew6 | Out-Null
     Note "ipv6 renew6 exit=$LASTEXITCODE"
 } catch { Note "ERROR ipv6-force: $($_.Exception.Message)" }
