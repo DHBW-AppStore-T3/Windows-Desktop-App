@@ -167,59 +167,61 @@ try {
     }
 } catch { Note "diag error: $($_.Exception.Message)" }
 
-# --- 3c. Force DHCPv6 -------------------------------------------------
-# The guest came up with only a link-local address for several rounds.
-# The subnet is dhcpv6-stateful, and Windows starts a DHCPv6 client only
-# when a Router Advertisement carries the M (Managed) flag. Linux hosts
-# on this same network do not wait for that - their netplan sets
-# "dhcp6: true", which solicits unconditionally - which is why the
-# AppStore's own Linux VMs hold a /128 DHCPv6 lease here and Windows
-# held nothing.
+# --- 3c. IPv6 address --------------------------------------------------
+# Set statically from the address Terraform allocated on the Neutron
+# port, rather than relying on DHCPv6.
 #
-# managedaddress/otherstateful make Windows behave the same way: solicit
-# regardless of what the RA says.
+# This subnet is dhcpv6-stateful, and Windows would not take an address
+# from it. It only solicits once a Router Advertisement sets the M flag,
+# and the netsh parameters that would override that are rejected on this
+# build ("Falscher Parameter"). The guest therefore came up holding only
+# a link-local address, which from outside is indistinguishable from a
+# firewall blocking RDP - packets to the global address never arrived at
+# all. Several rounds were spent on the wrong layer because of it.
+#
+# The port exists before the instance, so Terraform knows the address up
+# front and there is no need to discover it at boot.
+$v6Addr   = '${ipv6_addr}'
+$v6Prefix = '${ipv6_prefix}'
+$v6Gw     = '${ipv6_gw}'
+
 try {
-    $ifAlias = (Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -First 1).Name
-    if (-not $ifAlias) { $ifAlias = (Get-NetConnectionProfile | Select-Object -First 1).InterfaceAlias }
-    Note "ipv6 iface=$ifAlias"
-
-    foreach ($i in Get-NetIPInterface -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
-        Note "ipv6 iface-state $($i.InterfaceAlias) dhcp=$($i.Dhcp) ra=$($i.RouterDiscovery)"
-    }
-
-    # Get-NetIPInterface reporting Dhcp=Enabled does NOT mean Windows is
-    # soliciting - it means the interface MAY use DHCPv6 if a Router
-    # Advertisement sets the M flag. Forcing managedaddress is still the
-    # right lever; the previous attempts simply never applied, returning
-    # exit=1 twice while being dismissed as advisory.
-    #
-    # Address the interface by index rather than by alias: the alias is
-    # a generated tap name and quoting it through netsh is the likely
-    # reason those calls failed. Capture the output either way, so a
-    # further failure names itself instead of being a bare exit code.
     $ifIndex = (Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1).ifIndex
-    Note "ipv6 ifindex=$ifIndex"
-    $nsOut = & netsh interface ipv6 set interface interface="$ifIndex" managedaddress=enabled otherstateful=enabled 2>&1
-    Note "ipv6 managedaddress exit=$LASTEXITCODE out=$(($nsOut | Out-String).Trim())"
-    $nsShow = & netsh interface ipv6 show interface interface="$ifIndex" 2>&1 | Select-String -Pattern "Managed|Other|Router" 
-    foreach ($line in $nsShow) { Note "ipv6 ifcfg $(($line.ToString()).Trim())" }
-    & ipconfig /renew6 | Out-Null
-    Note "ipv6 renew6 exit=$LASTEXITCODE"
-} catch { Note "ERROR ipv6-force: $($_.Exception.Message)" }
+    Note "ipv6 ifindex=$ifIndex target=$v6Addr/$v6Prefix gw=$v6Gw"
 
-# Give DHCPv6 time to land before we judge it.
+    $have = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $v6Addr }
+    if ($have) {
+        Note "ipv6 address already present"
+    } else {
+        New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $v6Addr -PrefixLength $v6Prefix -ErrorAction Stop | Out-Null
+        Note "ipv6 static address set"
+    }
+} catch { Note "ERROR ipv6 address: $($_.Exception.Message)" }
+
+try {
+    $haveRoute = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue
+    if ($haveRoute) {
+        Note "ipv6 default route already present"
+    } else {
+        New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '::/0' -NextHop $v6Gw -ErrorAction Stop | Out-Null
+        Note "ipv6 default route added via $v6Gw"
+    }
+} catch { Note "ERROR ipv6 route: $($_.Exception.Message)" }
+
+# Confirm what the interface ended up holding.
 $globalV6 = $null
-foreach ($attempt in 1..30) {
+foreach ($attempt in 1..15) {
     $globalV6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-        Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -ne '::1' } |
+        Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -ne '::1' } |
         Select-Object -First 1
     if ($globalV6) { break }
     Start-Sleep -Seconds 2
 }
 if ($globalV6) {
-    Note "ipv6 GLOBAL ACQUIRED $($globalV6.IPAddress)/$($globalV6.PrefixLength) state=$($globalV6.AddressState) origin=$($globalV6.PrefixOrigin)/$($globalV6.SuffixOrigin)"
+    Note "ipv6 GLOBAL ACQUIRED $($globalV6.IPAddress)/$($globalV6.PrefixLength) state=$($globalV6.AddressState)"
 } else {
-    Note "ERROR: still no global IPv6 after 60s - RDP will be unreachable"
+    Note "ERROR: still no global IPv6 - RDP will be unreachable"
 }
 
 # --- 4. Windows activation -------------------------------------------

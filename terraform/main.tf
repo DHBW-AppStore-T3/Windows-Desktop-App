@@ -227,6 +227,42 @@ resource "openstack_networking_secgroup_rule_v2" "egress_udp_v4" {
 }
 
 ############################
+# PORTS
+############################
+#
+# The port is created BEFORE the instance so Terraform knows the address
+# up front and can hand it to the guest. That breaks the dependency
+# cycle that would otherwise exist (user_data cannot reference the
+# instance's own address) and, more importantly, removes the dependence
+# on DHCPv6 entirely.
+#
+# Windows would not obtain an address on this dhcpv6-stateful subnet. It
+# only solicits when a Router Advertisement sets the M flag, the netsh
+# parameters that would force it are rejected on this build ("Falscher
+# Parameter"), and the guest consequently came up holding only a
+# link-local address - indistinguishable from a blocked firewall,
+# because packets to the global address never arrived at all.
+
+data "openstack_networking_subnet_v2" "v6" {
+  network_id = var.network_uuid
+  ip_version = 6
+}
+
+resource "openstack_networking_port_v2" "user_port" {
+  for_each           = local.users_map
+  network_id         = var.network_uuid
+  security_group_ids = [openstack_networking_secgroup_v2.win.id]
+}
+
+locals {
+  # all_fixed_ips carries both families; pick the v6 one.
+  port_ipv6 = {
+    for id, port in openstack_networking_port_v2.user_port :
+    id => [for ip in port.all_fixed_ips : ip if length(regexall(":", ip)) > 0][0]
+  }
+}
+
+############################
 # PER-USER VMs
 ############################
 
@@ -244,15 +280,14 @@ resource "openstack_compute_instance_v2" "user_vm" {
   # More reliable than the metadata service alone on a Windows guest.
   config_drive = true
 
-  security_groups = [openstack_networking_secgroup_v2.win.name]
-
+  # Security groups live on the port now, not on the instance.
   timeouts {
     create = "30m"
     delete = "15m"
   }
 
   network {
-    uuid = var.network_uuid
+    port = openstack_networking_port_v2.user_port[each.key].id
   }
 
   user_data = templatefile("${path.module}/bootstrap.ps1.tpl", {
@@ -261,6 +296,9 @@ resource "openstack_compute_instance_v2" "user_vm" {
     is_admin    = var.student_is_admin
     kms_host    = var.kms_host
     displayname = each.value.email
+    ipv6_addr   = local.port_ipv6[each.key]
+    ipv6_prefix = split("/", data.openstack_networking_subnet_v2.v6.cidr)[1]
+    ipv6_gw     = data.openstack_networking_subnet_v2.v6.gateway_ip
   })
 
   metadata = {
@@ -272,20 +310,10 @@ resource "openstack_compute_instance_v2" "user_vm" {
 }
 
 locals {
-  # Nova reports both the NAT IPv4 and the public IPv6; students can only
-  # reach the v6 one, so pick that explicitly rather than access_ip_v4.
-  user_ipv6 = {
-    for id, vm in openstack_compute_instance_v2.user_vm :
-    id => try(
-      [for n in vm.network : n.fixed_ip_v6 if n.fixed_ip_v6 != ""][0],
-      vm.access_ip_v6
-    )
-  }
-
-  # access_ip_v6 comes back bracketed from the provider while
-  # fixed_ip_v6 does not. Normalise to a BARE address — the frontend and
-  # the mail template both add brackets themselves.
-  user_ipv6_bare = {
-    for id, ip in local.user_ipv6 : id => replace(replace(ip, "[", ""), "]", "")
-  }
+  # Read from the port rather than the instance: it is the same address,
+  # it is known earlier, and it is the one actually configured in the
+  # guest. Bare, without brackets - the frontend and the mail template
+  # each add their own.
+  user_ipv6_bare = local.port_ipv6
 }
+
