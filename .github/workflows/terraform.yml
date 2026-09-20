@@ -60,16 +60,28 @@ jobs:
       run: tflint --recursive
       working-directory: terraform
 
-    # Installed directly rather than via aquasecurity/tfsec-action.
-    # That action resolves the release through the GitHub API, which
-    # fails from hosted runners either way: unauthenticated it hits the
-    # shared IP rate limit (403, intermittently), and authenticated it
-    # hits the aquasecurity org's IP allow list (403, every time). A
-    # release asset download is not subject to either, and pinning the
-    # version makes the check reproducible instead of tracking latest.
-    - name: Run tfsec
+    # Trivy, not tfsec: tfsec is end-of-life and its checks were folded
+    # into Trivy, which is also what the deployment repo scans with.
+    #
+    # Downloaded as a pinned release asset and checksum-verified, rather
+    # than piping install.sh from the main branch. Pinning keeps the check
+    # reproducible instead of tracking latest, and a release asset is not
+    # subject to the GitHub API rate limits that made the old tfsec action
+    # unusable from hosted runners. Bump VERSION and SHA256 together; the
+    # hash is the one in that release's trivy_<version>_checksums.txt.
+    #
+    # No --severity filter, deliberately. tfsec failed the build on any
+    # finding, and the check that matters most here - OPNSTK-0003, public
+    # ingress on a security group - is MEDIUM. Filtering to HIGH,CRITICAL
+    # would quietly stop this repo being scanned for the one thing it most
+    # needs scanning for.
+    - name: Run Trivy (IaC)
+      env:
+        TRIVY_VERSION: '0.74.0'
+        TRIVY_SHA256: '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
       run: |
         set -euo pipefail
-        curl -sSLf -o /tmp/tfsec           https://github.com/aquasecurity/tfsec/releases/download/v1.28.14/tfsec-linux-amd64
-        chmod +x /tmp/tfsec
-        /tmp/tfsec terraform
+        curl -sSLf -o /tmp/trivy.tar.gz           "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        echo "$TRIVY_SHA256  /tmp/trivy.tar.gz" | sha256sum -c -
+        tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+        /tmp/trivy config --exit-code 1 terraform
