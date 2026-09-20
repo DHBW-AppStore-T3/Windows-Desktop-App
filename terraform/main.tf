@@ -51,6 +51,11 @@ locals {
 
   users_map  = { for user in local.all_users : user.id => user }
   teams_list = distinct([for user in local.all_users : user.team])
+
+  # The Nova instance name becomes the Windows NetBIOS name AND the name
+  # on the RDP certificate, and it is what the student is told to type.
+  # Derived once so those three can never disagree.
+  vm_names = { for id in keys(local.users_map) : id => "${local.app_name}-${substr(md5(id), 0, 8)}" }
 }
 
 # One password per user. The character set deliberately excludes the
@@ -273,7 +278,7 @@ resource "openstack_compute_instance_v2" "user_vm" {
   # is capped at 15 chars (NetBIOS) — a readable "win11-team-firstname"
   # would be silently truncated and could collide. Keep the name short
   # and unique; the human-readable identity lives in metadata below.
-  name        = "${local.app_name}-${substr(md5(each.key), 0, 8)}"
+  name        = local.vm_names[each.key]
   image_id    = data.openstack_images_image_v2.image.id
   flavor_name = var.flavor_name
 
@@ -299,6 +304,7 @@ resource "openstack_compute_instance_v2" "user_vm" {
     ipv6_addr   = local.port_ipv6[each.key]
     ipv6_prefix = split("/", data.openstack_networking_subnet_v2.v6.cidr)[1]
     ipv6_gw     = data.openstack_networking_subnet_v2.v6.gateway_ip
+    vm_name     = local.vm_names[each.key]
   })
 
   metadata = {
