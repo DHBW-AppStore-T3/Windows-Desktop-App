@@ -83,18 +83,19 @@ resource "openstack_networking_secgroup_v2" "win" {
   delete_default_rules = true
 }
 
-# tfsec:ignore:openstack-networking-no-public-ingress
-# tfsec cannot resolve each.value through the for_each, so it assumes the
-# worst. The prefixes are constrained by two validation blocks on
-# var.rdp_allowed_prefixes, which reject ::/0 and 0.0.0.0/0 at plan time
-# - a stronger guarantee than this check provides.
+# tfsec's no-public-ingress fires on any ingress from a public CIDR that
+# is wider than a single host, so it will always fire here: students
+# connect from public IPv6 space. The exposure is bounded instead by two
+# validation blocks on var.rdp_allowed_prefixes, which reject ::/0 and
+# 0.0.0.0/0 at PLAN time - a stronger guarantee than a lint rule.
 resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
-  for_each          = toset(var.rdp_allowed_prefixes)
-  direction         = "ingress"
-  ethertype         = "IPv6"
-  protocol          = "tcp"
-  port_range_min    = 3389
-  port_range_max    = 3389
+  for_each       = toset(var.rdp_allowed_prefixes)
+  direction      = "ingress"
+  ethertype      = "IPv6"
+  protocol       = "tcp"
+  port_range_min = 3389
+  port_range_max = 3389
+  #tfsec:ignore:openstack-networking-no-public-ingress
   remote_ip_prefix  = each.value
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
