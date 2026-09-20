@@ -13,13 +13,10 @@ Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-544').Name -Member $u
 
 Write-Output "created build user"
 
-# Windows classifies the OpenStack network as "Oeffentlich" (Public), and
-# WinRM refuses to apply its firewall exception on a Public profile:
-#   "Die WinRM-Firewallausnahme funktioniert nicht, da einer der
-#    Netzwerkverbindungstypen auf diesem Computer auf Oeffentlich
-#    festgelegt ist"  (0x80338169)
-# That is why the previous build's "winrm set" calls errored out. Move
-# every adapter to Private before touching WinRM.
+# WinRM refuses to apply its firewall exception while any connection is
+# classified Public (0x80338169), which is how Windows classifies the
+# OpenStack network on first boot. Move every adapter to Private first, or
+# the "winrm set" calls below fail.
 try {
     Get-NetConnectionProfile | ForEach-Object {
         Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
@@ -53,18 +50,13 @@ try {
 Set-Service -Name WinRM -StartupType Automatic
 Start-Service -Name WinRM
 
-# A native command's non-zero exit does NOT throw, not even under
-# ErrorActionPreference 'Stop'. The previous version therefore printed a
-# success message while winrm set was failing. Report the exit codes so
-# the console log shows the truth.
+# A native command's non-zero exit does not throw, not even under
+# ErrorActionPreference 'Stop', so report the exit codes explicitly -
+# otherwise a failed "winrm set" still prints a success message.
 & winrm set winrm/config/service/auth '@{Basic="true"}' | Out-Null
 Write-Output "winrm auth Basic exit=$LASTEXITCODE"
 & winrm set winrm/config/service '@{AllowUnencrypted="false"}' | Out-Null
 Write-Output "winrm AllowUnencrypted exit=$LASTEXITCODE"
-
-# If this ever 401s again, the console log should say which auth schemes
-# the service actually accepts instead of leaving us to guess.
-& winrm get winrm/config/service/auth 2>&1 | ForEach-Object { Write-Output "authcfg: $_" }
 
 if (-not (Get-NetFirewallRule -Name 'Packer-WinRM-HTTPS' -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -Name 'Packer-WinRM-HTTPS' -DisplayName 'Packer WinRM HTTPS' `
