@@ -82,3 +82,19 @@ variable "student_is_admin" {
   type        = bool
   default     = false
 }
+
+variable "bootstrap_timeout_minutes" {
+  description = <<-EOT
+    Wie lange auf die Meldung "Bootstrap fertig" aus der VM gewartet wird,
+    bevor das Deployment als fehlgeschlagen gilt. Ein gesunder Windows-Boot
+    meldet sich nach 2-3 Minuten; der Default laesst viel Luft, damit ein
+    langsamer Hypervisor kein falsches Negativ erzeugt.
+  EOT
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.bootstrap_timeout_minutes >= 5
+    error_message = "Unter 5 Minuten entstehen falsche Fehlschlaege - ein Windows-Erststart dauert laenger."
+  }
+}

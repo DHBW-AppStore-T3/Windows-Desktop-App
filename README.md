@@ -95,6 +95,35 @@ Studierende muessen ihre Arbeit selbst sichern.
 | `rdp_allowed_prefixes` | IPv6-Praefixe, die RDP erreichen duerfen | `2001:7c0:1b20::/48` |
 | `kms_host` | KMS-Server fuer die Aktivierung | `""` (DNS-Discovery) |
 | `student_is_admin` | Studierende als lokale Admins | `false` |
+| `bootstrap_timeout_minutes` | Wartezeit auf die Fertigmeldung der VM | `20` |
+
+## Startkontrolle
+
+Nova meldet `ACTIVE`, sobald der Hypervisor die VM gestartet hat — nicht,
+wenn Windows oben ist. Eine VM, die sich beim ersten Start in der
+Sysprep-Phase aufhaengt, bleibt dauerhaft `ACTIVE`, fuehrt cloudbase-init
+nie aus und laesst sich auch durch einen Neustart nicht retten.
+
+Ohne Gegenmassnahme gilt so ein Deployment als **erfolgreich**: die
+Zugangsdaten werden verschickt, und der erste, der den Fehler bemerkt, ist
+der Studierende vor einer VM, die ihn nicht einlaesst.
+
+`terraform/wait_for_bootstrap.py` verhindert das. Das Bootstrap-Skript gibt
+als letzte Aktion `@@BOOTSTRAP done` aus, cloudbase-init schreibt seine
+Ausgabe in das Nova-Konsolenlog, und ein `null_resource` wartet auf genau
+diese Markierung. Bleibt sie aus, schlaegt `terraform apply` fehl und das
+Deployment wird als fehlgeschlagen gemeldet — inklusive der zuletzt
+gesehenen Markierungen, damit der Abbruchpunkt sichtbar ist.
+
+Geprueft wird das Konsolenlog und nicht Port 3389: der Worker-Container,
+der Terraform ausfuehrt, hat ueberhaupt keine IPv6-Route, die VMs sind
+aber ausschliesslich ueber IPv6 erreichbar.
+
+Manuell nachsehen:
+
+```bash
+openstack console log show <server-id> | grep @@BOOTSTRAP
+```
 
 ## Sicherheit
 
