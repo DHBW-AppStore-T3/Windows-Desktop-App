@@ -6,6 +6,13 @@ $ErrorActionPreference = 'Stop'
 Remove-LocalUser -Name 'packerbuild' -ErrorAction SilentlyContinue
 Get-NetFirewallRule -Name 'Packer-WinRM-HTTPS' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 
+# Undo the build-time UAC relaxation. It exists only so Packer can drive
+# this machine over WinRM with a local account; leaving it enabled would
+# weaken every student desktop cloned from this image.
+Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+    -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue
+Write-Output "LocalAccountTokenFilterPolicy removed"
+
 $cbDir    = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init'
 $unattend = Join-Path $cbDir 'conf\Unattend.xml'
 $sysprep  = "$env:SystemRoot\System32\Sysprep\sysprep.exe"
