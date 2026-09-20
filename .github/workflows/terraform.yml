@@ -52,7 +52,16 @@ jobs:
       run: tflint --recursive
       working-directory: terraform
 
+    # Installed directly rather than via aquasecurity/tfsec-action.
+    # That action resolves the release through the GitHub API, which
+    # fails from hosted runners either way: unauthenticated it hits the
+    # shared IP rate limit (403, intermittently), and authenticated it
+    # hits the aquasecurity org's IP allow list (403, every time). A
+    # release asset download is not subject to either, and pinning the
+    # version makes the check reproducible instead of tracking latest.
     - name: Run tfsec
-      uses: aquasecurity/tfsec-action@v1.0.3
-      with:
-        working_directory: terraform
+      run: |
+        set -euo pipefail
+        curl -sSLf -o /tmp/tfsec           https://github.com/aquasecurity/tfsec/releases/download/v1.28.14/tfsec-linux-amd64
+        chmod +x /tmp/tfsec
+        /tmp/tfsec terraform
