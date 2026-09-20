@@ -7,11 +7,18 @@ packer {
   }
 }
 
+# Singular "local" block, not "locals": this form is evaluated exactly
+# once. uuidv4() is non-deterministic, and a value referenced both by
+# winrm_password and by the user_data templatefile MUST be identical -
+# otherwise Packer authenticates with a different password than the one
+# baked into the account, which surfaces only as a WinRM 401.
+local "build_password" {
+  expression = "Pk-${uuidv4()}-Aa1!"
+  sensitive  = true
+}
+
 locals {
-  # Random per build, so no build credential is ever committed. Only
-  # ever used between Packer and the short-lived build instance.
-  build_password = "Pk-${uuidv4()}-Aa1!"
-  build_user     = "packerbuild"
+  build_user = "packerbuild"
 }
 
 source "openstack" "image" {
