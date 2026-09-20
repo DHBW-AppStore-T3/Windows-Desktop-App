@@ -144,9 +144,26 @@ try {
     }
     $rule = Get-NetFirewallRule -Name 'AppStore-RDP-In' -ErrorAction SilentlyContinue
     if ($rule) {
-        Note "rdprule enabled=$($rule.Enabled) profile=$($rule.Profile) action=$($rule.Action)"
+        Note "rdprule enabled=$($rule.Enabled) profile=$($rule.Profile) action=$($rule.Action) dir=$($rule.Direction)"
+        # enabled/profile/action looked correct while every inbound TCP
+        # port still timed out, so report what the rule actually MATCHES.
+        $pf = $rule | Get-NetFirewallPortFilter
+        Note "rdprule filter proto=$($pf.Protocol) localport=$($pf.LocalPort) remoteport=$($pf.RemotePort)"
+        $af = $rule | Get-NetFirewallAddressFilter
+        Note "rdprule addrs local=$($af.LocalAddress) remote=$($af.RemoteAddress)"
     } else {
         Note "rdprule MISSING"
+    }
+
+    # Which IPv6 addresses does Windows actually hold? If this does not
+    # include the address Neutron assigned to the port, packets to that
+    # address are dropped before Windows ever sees them - which looks
+    # exactly like a firewall problem from outside.
+    foreach ($addr in Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
+        Note "ipv6 $($addr.IPAddress)/$($addr.PrefixLength) iface=$($addr.InterfaceAlias) origin=$($addr.PrefixOrigin)/$($addr.SuffixOrigin) state=$($addr.AddressState)"
+    }
+    foreach ($r in Get-NetRoute -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
+        if ($r.DestinationPrefix -eq "::/0") { Note "ipv6 defaultroute via $($r.NextHop) iface=$($r.InterfaceAlias)" }
     }
 } catch { Note "diag error: $($_.Exception.Message)" }
 
