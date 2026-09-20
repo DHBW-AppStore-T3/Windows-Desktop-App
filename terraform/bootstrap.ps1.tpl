@@ -167,6 +167,47 @@ try {
     }
 } catch { Note "diag error: $($_.Exception.Message)" }
 
+# --- 3c. Force DHCPv6 -------------------------------------------------
+# The guest came up with only a link-local address for several rounds.
+# The subnet is dhcpv6-stateful, and Windows starts a DHCPv6 client only
+# when a Router Advertisement carries the M (Managed) flag. Linux hosts
+# on this same network do not wait for that - their netplan sets
+# "dhcp6: true", which solicits unconditionally - which is why the
+# AppStore's own Linux VMs hold a /128 DHCPv6 lease here and Windows
+# held nothing.
+#
+# managedaddress/otherstateful make Windows behave the same way: solicit
+# regardless of what the RA says.
+try {
+    $ifAlias = (Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -First 1).Name
+    if (-not $ifAlias) { $ifAlias = (Get-NetConnectionProfile | Select-Object -First 1).InterfaceAlias }
+    Note "ipv6 iface=$ifAlias"
+
+    foreach ($i in Get-NetIPInterface -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
+        Note "ipv6 iface-state $($i.InterfaceAlias) dhcp=$($i.Dhcp) ra=$($i.RouterDiscovery)"
+    }
+
+    & netsh interface ipv6 set interface "$ifAlias" managedaddress=enabled otherstateful=enabled | Out-Null
+    Note "ipv6 managedaddress/otherstateful forced exit=$LASTEXITCODE"
+    & ipconfig /renew6 | Out-Null
+    Note "ipv6 renew6 exit=$LASTEXITCODE"
+} catch { Note "ERROR ipv6-force: $($_.Exception.Message)" }
+
+# Give DHCPv6 time to land before we judge it.
+$globalV6 = $null
+foreach ($attempt in 1..30) {
+    $globalV6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+        Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -ne '::1' } |
+        Select-Object -First 1
+    if ($globalV6) { break }
+    Start-Sleep -Seconds 2
+}
+if ($globalV6) {
+    Note "ipv6 GLOBAL ACQUIRED $($globalV6.IPAddress)/$($globalV6.PrefixLength) state=$($globalV6.AddressState) origin=$($globalV6.PrefixOrigin)/$($globalV6.SuffixOrigin)"
+} else {
+    Note "ERROR: still no global IPv6 after 60s - RDP will be unreachable"
+}
+
 # --- 4. Windows activation -------------------------------------------
 # Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
 # found either via DNS SRV (_vlmcs._tcp) or set explicitly here.
