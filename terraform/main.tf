@@ -113,10 +113,11 @@ resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
 # ICMPv6 "Packet Too Big", without which large TCP segments black-hole
 # instead of triggering path-MTU discovery.
 resource "openstack_networking_secgroup_rule_v2" "icmpv6_in" {
-  for_each          = toset(["fe80::/10", "2001:7c0:1b20::/48"])
-  direction         = "ingress"
-  ethertype         = "IPv6"
-  protocol          = "ipv6-icmp"
+  for_each  = toset(["fe80::/10", "2001:7c0:1b20::/48"])
+  direction = "ingress"
+  ethertype = "IPv6"
+  protocol  = "ipv6-icmp"
+  #tfsec:ignore:openstack-networking-no-public-ingress
   remote_ip_prefix  = each.value
   security_group_id = openstack_networking_secgroup_v2.win.id
 }

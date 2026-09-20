@@ -38,6 +38,12 @@ jobs:
 
     - name: Packer Init
       run: packer init packer
+      env:
+        # Unauthenticated plugin downloads share one IP-based GitHub rate
+        # limit across all runners, which fails this step at random with
+        # "Plugin host rate limited the plugin getter". The default token
+        # is enough to get a per-repo limit.
+        PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Packer Format
       run: packer fmt -check packer
