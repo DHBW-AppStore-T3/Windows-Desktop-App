@@ -224,6 +224,25 @@ if ($globalV6) {
     Note "ERROR: still no global IPv6 - RDP will be unreachable"
 }
 
+# --- 3d. RDP certificate ----------------------------------------------
+# RDP presents a self-signed certificate, so a trust warning is normal
+# without a PKI. The NAME on it was not: it read DESKTOP-TBBP874, the
+# machine name from Packer build time. The certificate is generated once
+# and then baked into the image, and sysprep does not regenerate it - so
+# every desktop cloned from that image presented the same stale name.
+#
+# Beyond looking alarming, it defeats the one check a student could
+# actually make: the name in the warning should be their own machine.
+# Delete it and let TermService issue a fresh one for the real hostname.
+try {
+    Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+        -Name 'SSLCertificateSHA1Hash' -ErrorAction SilentlyContinue
+    Restart-Service TermService -Force -ErrorAction Stop
+    Note "rdp certificate cleared, TermService restarted for regeneration"
+} catch { Note "rdp certificate reset failed: $($_.Exception.Message)" }
+
 # --- 4. Windows activation -------------------------------------------
 # Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
 # found either via DNS SRV (_vlmcs._tcp) or set explicitly here.
@@ -233,7 +252,15 @@ try {
         Note "KMS host set to $kmsHost"
     }
     & cscript.exe //nologo "$env:SystemRoot\System32\slmgr.vbs" /ato | Out-Null
-    Note "activation attempted"
+    Note "activation attempted exit=$LASTEXITCODE"
+
+    # LicenseStatus: 0 unlicensed, 1 licensed, 2 OOB grace, 3 OOT grace,
+    # 4 non-genuine, 5 notification, 6 extended grace. Students are not
+    # local admins and slmgr needs elevation, so the answer has to reach
+    # the console log rather than waiting for someone to check in-session.
+    foreach ($lic in Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'" -ErrorAction SilentlyContinue) {
+        Note "activation name=$($lic.Name) status=$($lic.LicenseStatus) reason=$($lic.LicenseStatusReason) kms=$($lic.KeyManagementServiceMachine) grace_min=$($lic.GracePeriodRemaining)"
+    }
 } catch { Note "ERROR activation: $($_.Exception.Message)" }
 
 # --- 5. Report listening state ---------------------------------------
