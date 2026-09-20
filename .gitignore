@@ -13,5 +13,9 @@ packer_cache/
 # Local clouds.yaml must never be committed
 clouds.yaml
 
+# Python bytecode from the readiness script
+__pycache__/
+*.pyc
+
 # OS files
 .DS_Store
