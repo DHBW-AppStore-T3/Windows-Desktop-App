@@ -32,6 +32,13 @@ source "openstack" "image" {
   winrm_password = local.build_password
   winrm_use_ssl  = true
   winrm_insecure = true
+  # NTLM rather than Packer's default Basic auth. Basic is disabled by
+  # default on Windows and can only be switched on once the WinRM service
+  # is running - but cloudbase-init starts that service in
+  # ConfigWinRMListenerPlugin, which runs AFTER UserDataPlugin. Enabling
+  # it from user_data therefore fails silently and Packer gets a 401.
+  # Negotiate/NTLM needs no such bootstrapping.
+  winrm_use_ntlm = true
   winrm_port     = 5986
   winrm_timeout  = "40m"
 
