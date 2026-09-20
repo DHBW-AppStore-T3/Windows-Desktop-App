@@ -46,6 +46,21 @@ variable "rdp_allowed_prefixes" {
   EOT
   type        = list(string)
   default     = ["2001:7c0:1b20::/48"]
+
+  validation {
+    condition     = length(var.rdp_allowed_prefixes) > 0
+    error_message = "Mindestens ein Praefix ist erforderlich - sonst ist keine VM erreichbar."
+  }
+
+  # Enforced at plan time, which is stronger than a lint rule: a wizard
+  # value of ::/0 is rejected outright rather than merely warned about.
+  validation {
+    condition = alltrue([
+      for p in var.rdp_allowed_prefixes :
+      !contains(["::/0", "0.0.0.0/0", "::0/0"], trimspace(p))
+    ])
+    error_message = "rdp_allowed_prefixes darf ::/0 bzw. 0.0.0.0/0 nicht enthalten. RDP mit Passwort-Login am offenen Netz ist ein bekanntes Brute-Force-Ziel."
+  }
 }
 
 variable "kms_host" {

@@ -83,6 +83,11 @@ resource "openstack_networking_secgroup_v2" "win" {
   delete_default_rules = true
 }
 
+# tfsec:ignore:openstack-networking-no-public-ingress
+# tfsec cannot resolve each.value through the for_each, so it assumes the
+# worst. The prefixes are constrained by two validation blocks on
+# var.rdp_allowed_prefixes, which reject ::/0 and 0.0.0.0/0 at plan time
+# - a stronger guarantee than this check provides.
 resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
   for_each          = toset(var.rdp_allowed_prefixes)
   direction         = "ingress"
