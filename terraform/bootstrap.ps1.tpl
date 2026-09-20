@@ -120,6 +120,36 @@ try {
     Note "TermService $($svc.Status)/$($svc.StartType)"
 } catch { Note "ERROR termservice: $($_.Exception.Message)" }
 
+# --- 3b. Network profile + firewall diagnostics -----------------------
+# Windows classifies this network as "Oeffentlich" (Public) on first
+# boot. The build image sets it to Private for WinRM, but that is a
+# per-connection setting and does not survive into the deployed VM, so
+# it has to be set again here. The AppStore-RDP-In rule is scoped
+# Profile Any and should apply regardless - the diagnostics below exist
+# so that if 3389 is still filtered we can see which of the two is
+# actually to blame instead of guessing.
+try {
+    Get-NetConnectionProfile | ForEach-Object {
+        Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
+    }
+    Note "network profile set to Private"
+} catch { Note "could not set network profile: $($_.Exception.Message)" }
+
+try {
+    foreach ($prof in Get-NetConnectionProfile) {
+        Note "netprofile iface=$($prof.InterfaceAlias) category=$($prof.NetworkCategory)"
+    }
+    foreach ($fw in Get-NetFirewallProfile) {
+        Note "fwprofile $($fw.Name) enabled=$($fw.Enabled) inbound=$($fw.DefaultInboundAction)"
+    }
+    $rule = Get-NetFirewallRule -Name 'AppStore-RDP-In' -ErrorAction SilentlyContinue
+    if ($rule) {
+        Note "rdprule enabled=$($rule.Enabled) profile=$($rule.Profile) action=$($rule.Action)"
+    } else {
+        Note "rdprule MISSING"
+    }
+} catch { Note "diag error: $($_.Exception.Message)" }
+
 # --- 4. Windows activation -------------------------------------------
 # Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
 # found either via DNS SRV (_vlmcs._tcp) or set explicitly here.
@@ -141,7 +171,9 @@ try {
     foreach ($attempt in 1..30) {
         if (Get-NetTCPConnection -State Listen -LocalPort 3389 -ErrorAction SilentlyContinue) {
             $bound = $true
-            Note "RDP LISTENING ok after $attempt checks"
+            $addrs = (Get-NetTCPConnection -State Listen -LocalPort 3389 |
+                ForEach-Object { $_.LocalAddress }) -join ","
+            Note "RDP LISTENING ok after $attempt checks on [$addrs]"
             break
         }
         Start-Sleep -Seconds 2
