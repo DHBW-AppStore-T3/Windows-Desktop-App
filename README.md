@@ -16,6 +16,28 @@ Remote-Desktop-Client:
 Der AppStore zeigt den fertigen Verbindungsbefehl an und verschickt ihn
 zusammen mit Benutzername und Passwort per Mail.
 
+### Benutzername: der Rechnername gehoert davor
+
+Die VMs sind in keiner Domaene. Ein blosses `lucabaeck` versucht Windows
+als Domaenen-Anmeldung und scheitert. Richtig ist einer von beiden:
+
+```
+win11-714f9ac8\lucabaeck     Rechnername aus der Mail
+.\lucabaeck                  Kurzform fuer "dieser Rechner"
+```
+
+### Die Zertifikatswarnung ist erwartet
+
+Beim Verbinden meldet der RDP-Client, dass die Identitaet des Rechners
+nicht ueberprueft werden kann. Das ist normal und nicht zu umgehen: die
+VMs haben kein Zertifikat einer anerkannten CA, sondern ein
+selbstsigniertes.
+
+Pruefbar ist trotzdem etwas — **der Name im Zertifikat muss exakt der
+Rechnername aus der Mail sein** (`win11-xxxxxxxx`). Steht dort etwas
+anderes, insbesondere `DESKTOP-xxxxxxx`, verbindet man sich nicht mit der
+erwarteten Maschine und sollte das melden.
+
 > **IPv6 erforderlich.** Die VMs sind ausschliesslich ueber IPv6
 > erreichbar — die Cloud vergibt keine oeffentlichen IPv4-Adressen. Das
 > gilt fuer alle Apps dieser Plattform, nicht nur fuer diese. Aus dem
@@ -125,6 +147,15 @@ Manuell nachsehen:
 openstack console log show <server-id> | grep @@BOOTSTRAP
 ```
 
+Schlaegt der Check fehl, nennt die Fehlermeldung die zuletzt gesehenen
+Markierungen. Zwei Faelle:
+
+- **Markierungen vorhanden, aber kein `done`** — der Bootstrap lief an und
+  blieb stehen. Die letzte Markierung zeigt, wo.
+- **Gar keine Markierungen** — Windows haengt in der Specialize-Phase des
+  Erststarts, cloudbase-init kommt nie dran. Diese VM ist nicht zu retten,
+  auch nicht per Neustart: Deployment zerstoeren und neu ausrollen.
+
 ## Sicherheit
 
 - **RDP nie auf `::/0` oeffnen.** `rdp_allowed_prefixes` ist auf das
@@ -164,13 +195,28 @@ Sysprep `/generalize` hat ein Rearm-Limit von ca. 3.
 
 | Schritt | Dauer (ca.) |
 |---|---|
-| Packer Image Build | 20–45 min |
-| Terraform apply | 5–10 min |
-| Windows-Erststart bis RDP bereit | 3–6 min nach `apply` |
+| Packer Image Build | 20–45 min (entfaellt, wenn das Image schon gebaut ist) |
+| Terraform apply inkl. Warten auf Windows | 6–12 min |
 
-Terraform meldet die VM als fertig, bevor Windows durchgebootet ist.
-Studierende sollten nach dem Deployment einige Minuten warten.
+Der `apply` schliesst erst ab, wenn die VM ihren Bootstrap als beendet
+meldet (siehe [Startkontrolle](#startkontrolle)). Ein als erfolgreich
+gemeldetes Deployment ist also tatsaechlich benutzbar — anders als
+frueher, wo Terraform fertig war, bevor Windows durchgebootet hatte.
 
-## Aenderungen in diesem Release
+## Aenderungen
 
+**v0.3.3**
+
+- Startkontrolle: ein Deployment gilt erst als erfolgreich, wenn die VM
+  ihren Bootstrap abgeschlossen meldet. Vorher konnte eine beim Erststart
+  haengende VM als fertig durchgehen, samt Mailversand der Zugangsdaten.
+- RDP-Zertifikat traegt jetzt den Rechnernamen. Vorher stand dort der von
+  Sysprep vergebene `DESKTOP-xxxxxxx`-Name, weil Windows zwei Namen fuehrt
+  und cloudbase-init nur den NetBIOS-Namen aendert — das Zertifikat haengt
+  aber am DNS-Hostnamen.
+
+**v0.3.x**
+
+- IPv6-Adresse wird aus dem Neutron-Port gesetzt statt per DHCPv6.
+- Eigene Security Group mit Egress-Allowlist.
 - Erstversion.

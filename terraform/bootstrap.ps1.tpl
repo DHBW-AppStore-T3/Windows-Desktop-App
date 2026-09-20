@@ -102,15 +102,6 @@ try {
     Note "firewall rule created"
 } catch { Note "ERROR fwrule: $($_.Exception.Message)" }
 
-# Belt and braces: also enable whatever built-in RDP rules exist,
-# matched by SID-independent group substring in either language.
-try {
-    Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayGroup -match 'Remotedesktop|Remote Desktop' } |
-        Enable-NetFirewallRule -ErrorAction SilentlyContinue
-    Note "builtin RDP rules enabled"
-} catch { Note "ERROR fwgroup: $($_.Exception.Message)" }
-
 # The registry flag alone does not bind the listener if TermService is
 # not running.
 try {
@@ -120,140 +111,69 @@ try {
     Note "TermService $($svc.Status)/$($svc.StartType)"
 } catch { Note "ERROR termservice: $($_.Exception.Message)" }
 
-# --- 3b. Network profile + firewall diagnostics -----------------------
-# Windows classifies this network as "Oeffentlich" (Public) on first
-# boot. The build image sets it to Private for WinRM, but that is a
-# per-connection setting and does not survive into the deployed VM, so
-# it has to be set again here. The AppStore-RDP-In rule is scoped
-# Profile Any and should apply regardless - the diagnostics below exist
-# so that if 3389 is still filtered we can see which of the two is
-# actually to blame instead of guessing.
+# --- 3b. Network profile ----------------------------------------------
+# Windows classifies this network as "Oeffentlich" (Public) on first boot.
+# The build image sets it to Private for WinRM, but that is a per-connection
+# setting and does not survive into the deployed VM, so it has to be set
+# again here. AppStore-RDP-In is scoped Profile Any and applies either way;
+# this keeps the machine's own classification honest.
 try {
     Get-NetConnectionProfile | ForEach-Object {
         Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
     }
     Note "network profile set to Private"
-} catch { Note "could not set network profile: $($_.Exception.Message)" }
-
-try {
-    foreach ($prof in Get-NetConnectionProfile) {
-        Note "netprofile iface=$($prof.InterfaceAlias) category=$($prof.NetworkCategory)"
-    }
-    foreach ($fw in Get-NetFirewallProfile) {
-        Note "fwprofile $($fw.Name) enabled=$($fw.Enabled) inbound=$($fw.DefaultInboundAction)"
-    }
-    $rule = Get-NetFirewallRule -Name 'AppStore-RDP-In' -ErrorAction SilentlyContinue
-    if ($rule) {
-        Note "rdprule enabled=$($rule.Enabled) profile=$($rule.Profile) action=$($rule.Action) dir=$($rule.Direction)"
-        # enabled/profile/action looked correct while every inbound TCP
-        # port still timed out, so report what the rule actually MATCHES.
-        $pf = $rule | Get-NetFirewallPortFilter
-        Note "rdprule filter proto=$($pf.Protocol) localport=$($pf.LocalPort) remoteport=$($pf.RemotePort)"
-        $af = $rule | Get-NetFirewallAddressFilter
-        Note "rdprule addrs local=$($af.LocalAddress) remote=$($af.RemoteAddress)"
-    } else {
-        Note "rdprule MISSING"
-    }
-
-    # Which IPv6 addresses does Windows actually hold? If this does not
-    # include the address Neutron assigned to the port, packets to that
-    # address are dropped before Windows ever sees them - which looks
-    # exactly like a firewall problem from outside.
-    foreach ($addr in Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
-        Note "ipv6 $($addr.IPAddress)/$($addr.PrefixLength) iface=$($addr.InterfaceAlias) origin=$($addr.PrefixOrigin)/$($addr.SuffixOrigin) state=$($addr.AddressState)"
-    }
-    foreach ($r in Get-NetRoute -AddressFamily IPv6 -ErrorAction SilentlyContinue) {
-        if ($r.DestinationPrefix -eq "::/0") { Note "ipv6 defaultroute via $($r.NextHop) iface=$($r.InterfaceAlias)" }
-    }
-} catch { Note "diag error: $($_.Exception.Message)" }
+} catch { Note "WARN could not set network profile: $($_.Exception.Message)" }
 
 # --- 3c. IPv6 address --------------------------------------------------
-# Set statically from the address Terraform allocated on the Neutron
-# port, rather than relying on DHCPv6.
+# Set statically from the address Terraform allocated on the Neutron port
+# rather than via DHCPv6. The subnet is dhcpv6-stateful and Windows will not
+# take an address from it: it only solicits once a Router Advertisement sets
+# the M flag, and the netsh parameters that would override that are rejected
+# on this build. The guest then comes up holding only a link-local address,
+# which from outside is indistinguishable from a blocked firewall.
 #
-# This subnet is dhcpv6-stateful, and Windows would not take an address
-# from it. It only solicits once a Router Advertisement sets the M flag,
-# and the netsh parameters that would override that are rejected on this
-# build ("Falscher Parameter"). The guest therefore came up holding only
-# a link-local address, which from outside is indistinguishable from a
-# firewall blocking RDP - packets to the global address never arrived at
-# all. Several rounds were spent on the wrong layer because of it.
-#
-# The port exists before the instance, so Terraform knows the address up
-# front and there is no need to discover it at boot.
+# The port is created before the instance, so the address is known up front
+# and nothing has to be discovered at boot.
 $v6Addr   = '${ipv6_addr}'
 $v6Prefix = '${ipv6_prefix}'
 $v6Gw     = '${ipv6_gw}'
 
 try {
     $ifIndex = (Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1).ifIndex
-    Note "ipv6 ifindex=$ifIndex target=$v6Addr/$v6Prefix gw=$v6Gw"
 
     $have = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -eq $v6Addr }
-    if ($have) {
-        Note "ipv6 address already present"
-    } else {
+    if (-not $have) {
         New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $v6Addr -PrefixLength $v6Prefix -ErrorAction Stop | Out-Null
-        Note "ipv6 static address set"
     }
+    Note "ipv6 $v6Addr/$v6Prefix on ifindex $ifIndex"
 } catch { Note "ERROR ipv6 address: $($_.Exception.Message)" }
 
 try {
-    $haveRoute = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue
-    if ($haveRoute) {
-        Note "ipv6 default route already present"
-    } else {
+    if (-not (Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue)) {
         New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '::/0' -NextHop $v6Gw -ErrorAction Stop | Out-Null
-        Note "ipv6 default route added via $v6Gw"
     }
+    Note "ipv6 default route via $v6Gw"
 } catch { Note "ERROR ipv6 route: $($_.Exception.Message)" }
 
-# Confirm what the interface ended up holding.
-$globalV6 = $null
-foreach ($attempt in 1..15) {
-    $globalV6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -ne '::1' } |
-        Select-Object -First 1
-    if ($globalV6) { break }
-    Start-Sleep -Seconds 2
-}
-if ($globalV6) {
-    Note "ipv6 GLOBAL ACQUIRED $($globalV6.IPAddress)/$($globalV6.PrefixLength) state=$($globalV6.AddressState)"
-} else {
-    Note "ERROR: still no global IPv6 - RDP will be unreachable"
-}
-
 # --- 3d. RDP certificate ----------------------------------------------
-# RDP's certificate is self-signed, so a trust warning is unavoidable
-# without a PKI. The NAME on it is what matters: it is the only check a
-# student can actually make against the machine they were told to
-# connect to.
+# Self-signed, so a trust warning is unavoidable without a PKI. The NAME on
+# it is what matters: it is the only check a student can make against the
+# machine they were told to connect to.
 #
-# Two earlier attempts got this wrong, both because of a wrong diagnosis.
-# Clearing the store and letting TermService reissue produced a correct,
-# freshly generated certificate that was still called DESKTOP-xxxxxxx,
-# and a scheduled task that re-checked after the rename could not have
-# helped either. The actual reason, read off a live VM over the wire:
+# It must be issued explicitly, because letting TermService generate its own
+# gets the name wrong. A Windows machine carries two names, and
+# cloudbase-init's SetHostNamePlugin changes only the NetBIOS one:
 #
-#   NetBIOS computer : WIN11-714F9AC8      <- cloudbase-init renames this
-#   DNS computer     : DESKTOP-NGPDAD9     <- and not this
+#   NetBIOS computer : win11-xxxxxxxx      <- renamed
+#   DNS computer     : DESKTOP-xxxxxxx     <- left at the sysprep value
 #
-# A Windows machine carries two names. cloudbase-init's SetHostNamePlugin
-# changes the NetBIOS name; the DNS hostname keeps whatever sysprep
-# generated. TermService names its self-signed certificate after the DNS
-# hostname, so it landed on the sysprep name every time no matter how
-# often it was regenerated. The old run-once task compared the subject
-# against COMPUTERNAME (the NetBIOS name), found a mismatch, cleared the
-# certificate, TermService reissued it under the DNS name again, and the
-# task then deleted itself having achieved nothing.
-#
-# Fixed by not depending on any of that. Terraform already knows the
-# instance name, so it is passed in and the certificate is issued
-# explicitly under it. No reboot, no race, no scheduled task.
+# TermService names its certificate after the DNS hostname, so every
+# regeneration landed back on the sysprep name. Terraform already knows the
+# instance name, so it is passed in and used directly - no reboot, no race.
 
 $certName = '${vm_name}'
-Note "certificate name target=$certName netbios=$env:COMPUTERNAME"
+Note "certificate name=$certName"
 
 # Align the DNS hostname too, so the machine is internally consistent and
 # anything else that reads it (and any certificate Windows reissues later

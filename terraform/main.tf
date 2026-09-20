@@ -109,26 +109,18 @@ resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
 
-# ICMPv6 INGRESS, unscoped - deliberately.
+# ICMPv6 ingress, unscoped - deliberately.
 #
-# Scoping this to fe80::/10 plus the DHBW prefix looked tighter and cost
-# a deploy to disprove. The guest came up holding ONLY a link-local
-# address and loopback: it never obtained the global address Neutron
-# assigned to its port, so every packet to that address was dropped
-# before Windows saw it. From outside that is indistinguishable from a
-# firewall problem - the Windows rule read correct all along
-# (proto=TCP localport=3389 dir=Inbound remote=Any) and RDP was bound to
-# both :: and 0.0.0.0.
+# ICMPv6 is not a diagnostic nicety like IPv4 ping: it carries Neighbour
+# Discovery and Router Advertisements, so filtering it stops IPv6 working
+# altogether. Narrowing this to fe80::/10 plus the campus prefix was tried
+# and left the guest holding only a link-local address, with every packet
+# to its global address dropped before Windows saw it.
 #
-# The subnet is dhcpv6-stateful: the guest only starts DHCPv6 once a
-# Router Advertisement tells it to, and it must then complete the
-# exchange. Both legs are ICMPv6/NDP-dependent, and the working
-# reference on this same network - the AppStore's own staging VM - does
-# exactly this: ipv6-icmp ingress from ::/0.
-#
-# This is not the weakening it looks like. RFC 4890 advises against
-# filtering ICMPv6 wholesale precisely because IPv6 stops working; the
-# real exposure is TCP, and 3389 stays scoped to rdp_allowed_prefixes.
+# RFC 4890 advises against filtering ICMPv6 wholesale for exactly this
+# reason, and the working reference on this same network - the AppStore's
+# own staging VM - does the same. The real exposure is TCP, and 3389 stays
+# scoped to rdp_allowed_prefixes.
 resource "openstack_networking_secgroup_rule_v2" "icmpv6_in" {
   direction = "ingress"
   ethertype = "IPv6"
@@ -138,21 +130,14 @@ resource "openstack_networking_secgroup_rule_v2" "icmpv6_in" {
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
 
-# DHCPv6 reply path. The client solicits from its link-local to
-# ff02::1:2 on port 547 (permitted by the egress list), and the server
-# answers from ITS link-local to the client on port 546. Nothing in this
-# group admitted that reply, so the guest solicited forever and came up
-# with only a link-local address - which looks exactly like a firewall
-# blocking RDP, because packets to the global address never arrive at
-# all. Three rounds were spent on the wrong layer because of it.
+# DHCPv6 reply path. The client solicits from its link-local address to
+# ff02::1:2 on port 547 (permitted by the egress list); the server answers
+# from its own link-local to the client on port 546. Without this rule the
+# reply is dropped and the guest solicits forever.
 #
-# The guest confirmed the diagnosis itself: dhcp=Enabled, renew6 exit=0,
-# no address. It was asking; nothing was answering.
-#
-# Unscoped like the ICMPv6 rule, and for the same reason: a DHCPv6
-# client port is not meaningful attack surface, and twice now a
-# hand-derived "tighter" prefix has silently broken address
-# configuration. TCP is where the exposure is, and 3389 stays scoped.
+# Unscoped for the same reason as the ICMPv6 rule: a DHCPv6 client port is
+# not meaningful attack surface, and a hand-derived "tighter" prefix has
+# twice broken address configuration silently. 3389 stays scoped.
 resource "openstack_networking_secgroup_rule_v2" "dhcpv6_in" {
   direction      = "ingress"
   ethertype      = "IPv6"
@@ -167,12 +152,11 @@ resource "openstack_networking_secgroup_rule_v2" "dhcpv6_in" {
 # Egress allow-list. Ports chosen so Windows Update (80/443), DNS,
 # NTP and KMS (1688) work while SSH/SMB/WinRM to neighbours do not.
 #
-# delete_default_rules removed the blanket allow-all, which means this
-# list has to carry the NETWORK layer as well, not just applications.
-# Leaving those out cost a full deploy: the guest never completed
-# address configuration, so cloudbase-init could not reach the metadata
-# service at 169.254.169.254, never fetched its user_data, and the VM
-# came up with no user and no RDP - while Nova happily reported ACTIVE.
+# delete_default_rules removed the blanket allow-all, so this list has to
+# carry the NETWORK layer too, not just applications. Without DHCP and NDP
+# the guest never completes address configuration, cannot reach the
+# metadata service at 169.254.169.254, and so never fetches its user_data -
+# while Nova still reports ACTIVE.
 locals {
   egress_tcp = [53, 80, 443, 1688]
 
@@ -239,18 +223,12 @@ resource "openstack_networking_secgroup_rule_v2" "egress_udp_v4" {
 # PORTS
 ############################
 #
-# The port is created BEFORE the instance so Terraform knows the address
-# up front and can hand it to the guest. That breaks the dependency
-# cycle that would otherwise exist (user_data cannot reference the
-# instance's own address) and, more importantly, removes the dependence
-# on DHCPv6 entirely.
-#
-# Windows would not obtain an address on this dhcpv6-stateful subnet. It
-# only solicits when a Router Advertisement sets the M flag, the netsh
-# parameters that would force it are rejected on this build ("Falscher
-# Parameter"), and the guest consequently came up holding only a
-# link-local address - indistinguishable from a blocked firewall,
-# because packets to the global address never arrived at all.
+# The port is created BEFORE the instance, so Terraform knows the address
+# up front and can hand it to the guest in user_data. That breaks the
+# dependency cycle an instance-derived address would create, and removes
+# the dependence on DHCPv6 - which Windows does not complete on this
+# dhcpv6-stateful subnet, leaving the guest with only a link-local
+# address.
 
 data "openstack_networking_subnet_v2" "v6" {
   network_id = var.network_uuid
