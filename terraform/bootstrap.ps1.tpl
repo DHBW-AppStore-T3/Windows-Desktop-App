@@ -133,9 +133,20 @@ try {
 } catch { Note "ERROR activation: $($_.Exception.Message)" }
 
 # --- 5. Report listening state ---------------------------------------
+# The listener needs a moment to bind after TermService starts, so poll
+# rather than sampling once - a bare "not listening yet" told us nothing
+# about whether it came up a second later.
 try {
-    $listening = Get-NetTCPConnection -State Listen -LocalPort 3389 -ErrorAction SilentlyContinue
-    if ($listening) { Note "RDP LISTENING ok" } else { Note "WARN: 3389 not listening yet" }
+    $bound = $false
+    foreach ($attempt in 1..30) {
+        if (Get-NetTCPConnection -State Listen -LocalPort 3389 -ErrorAction SilentlyContinue) {
+            $bound = $true
+            Note "RDP LISTENING ok after $attempt checks"
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $bound) { Note "ERROR: 3389 never started listening" }
 } catch { Note "ERROR listen-check: $($_.Exception.Message)" }
 
 Note "done"
