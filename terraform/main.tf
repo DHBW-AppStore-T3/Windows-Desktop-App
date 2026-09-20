@@ -100,25 +100,32 @@ resource "openstack_networking_secgroup_rule_v2" "rdp_in" {
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
 
-# ICMPv6 INGRESS. The egress counterpart below is not enough: IPv6
-# Neighbour Discovery is a conversation. The VM sends Router and
-# Neighbour Solicitations outbound, but the Router Advertisements and
-# Neighbour Advertisements that answer them are unsolicited multicast
-# from the router - not a stateful reply - so a security group drops
-# them unless this rule exists. Without it the guest never installs an
-# IPv6 default route, and RDP is unreachable even though the desktop
-# configured itself perfectly. That cost a full deploy to find.
+# ICMPv6 INGRESS, unscoped - deliberately.
 #
-# fe80::/10 carries NDP itself; the DHBW prefix additionally allows
-# ICMPv6 "Packet Too Big", without which large TCP segments black-hole
-# instead of triggering path-MTU discovery.
+# Scoping this to fe80::/10 plus the DHBW prefix looked tighter and cost
+# a deploy to disprove. The guest came up holding ONLY a link-local
+# address and loopback: it never obtained the global address Neutron
+# assigned to its port, so every packet to that address was dropped
+# before Windows saw it. From outside that is indistinguishable from a
+# firewall problem - the Windows rule read correct all along
+# (proto=TCP localport=3389 dir=Inbound remote=Any) and RDP was bound to
+# both :: and 0.0.0.0.
+#
+# The subnet is dhcpv6-stateful: the guest only starts DHCPv6 once a
+# Router Advertisement tells it to, and it must then complete the
+# exchange. Both legs are ICMPv6/NDP-dependent, and the working
+# reference on this same network - the AppStore's own staging VM - does
+# exactly this: ipv6-icmp ingress from ::/0.
+#
+# This is not the weakening it looks like. RFC 4890 advises against
+# filtering ICMPv6 wholesale precisely because IPv6 stops working; the
+# real exposure is TCP, and 3389 stays scoped to rdp_allowed_prefixes.
 resource "openstack_networking_secgroup_rule_v2" "icmpv6_in" {
-  for_each  = toset(["fe80::/10", "2001:7c0:1b20::/48"])
   direction = "ingress"
   ethertype = "IPv6"
   protocol  = "ipv6-icmp"
   #tfsec:ignore:openstack-networking-no-public-ingress
-  remote_ip_prefix  = each.value
+  remote_ip_prefix  = "::/0"
   security_group_id = openstack_networking_secgroup_v2.win.id
 }
 
