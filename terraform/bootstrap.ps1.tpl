@@ -187,12 +187,22 @@ try {
         Note "ipv6 iface-state $($i.InterfaceAlias) dhcp=$($i.Dhcp) ra=$($i.RouterDiscovery)"
     }
 
-    # Kept only as a belt-and-braces nudge. The premise behind adding it
-    # was wrong: the interface already reports dhcp=Enabled, so Windows
-    # was soliciting all along - the replies were being dropped. It also
-    # returned exit=1 in practice, so nothing here may depend on it.
-    & netsh interface ipv6 set interface "$ifAlias" managedaddress=enabled otherstateful=enabled 2>&1 | Out-Null
-    Note "ipv6 managedaddress nudge exit=$LASTEXITCODE (advisory only)"
+    # Get-NetIPInterface reporting Dhcp=Enabled does NOT mean Windows is
+    # soliciting - it means the interface MAY use DHCPv6 if a Router
+    # Advertisement sets the M flag. Forcing managedaddress is still the
+    # right lever; the previous attempts simply never applied, returning
+    # exit=1 twice while being dismissed as advisory.
+    #
+    # Address the interface by index rather than by alias: the alias is
+    # a generated tap name and quoting it through netsh is the likely
+    # reason those calls failed. Capture the output either way, so a
+    # further failure names itself instead of being a bare exit code.
+    $ifIndex = (Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1).ifIndex
+    Note "ipv6 ifindex=$ifIndex"
+    $nsOut = & netsh interface ipv6 set interface interface="$ifIndex" managedaddress=enabled otherstateful=enabled 2>&1
+    Note "ipv6 managedaddress exit=$LASTEXITCODE out=$(($nsOut | Out-String).Trim())"
+    $nsShow = & netsh interface ipv6 show interface interface="$ifIndex" 2>&1 | Select-String -Pattern "Managed|Other|Router" 
+    foreach ($line in $nsShow) { Note "ipv6 ifcfg $(($line.ToString()).Trim())" }
     & ipconfig /renew6 | Out-Null
     Note "ipv6 renew6 exit=$LASTEXITCODE"
 } catch { Note "ERROR ipv6-force: $($_.Exception.Message)" }
