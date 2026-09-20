@@ -227,64 +227,91 @@ if ($globalV6) {
 # --- 3d. RDP certificate ----------------------------------------------
 # RDP's certificate is self-signed, so a trust warning is unavoidable
 # without a PKI. The NAME on it is what matters: it is the only check a
-# student can actually make, and it was showing a machine name from
-# Packer build time.
+# student can actually make against the machine they were told to
+# connect to.
 #
-# Clearing it here was not enough. The regenerated certificate still
-# carried a sysprep DESKTOP-* name, because cloudbase-init's
-# SetHostNamePlugin defers the rename to a reboot - so at the moment
-# this script runs the machine may not yet be called win11-*.
+# Two earlier attempts got this wrong, both because of a wrong diagnosis.
+# Clearing the store and letting TermService reissue produced a correct,
+# freshly generated certificate that was still called DESKTOP-xxxxxxx,
+# and a scheduled task that re-checked after the rename could not have
+# helped either. The actual reason, read off a live VM over the wire:
 #
-# Handled both ways: fix it now if the name is already final, and leave
-# a run-once startup task that re-checks after the pending reboot and
-# then removes itself.
+#   NetBIOS computer : WIN11-714F9AC8      <- cloudbase-init renames this
+#   DNS computer     : DESKTOP-NGPDAD9     <- and not this
+#
+# A Windows machine carries two names. cloudbase-init's SetHostNamePlugin
+# changes the NetBIOS name; the DNS hostname keeps whatever sysprep
+# generated. TermService names its self-signed certificate after the DNS
+# hostname, so it landed on the sysprep name every time no matter how
+# often it was regenerated. The old run-once task compared the subject
+# against COMPUTERNAME (the NetBIOS name), found a mismatch, cleared the
+# certificate, TermService reissued it under the DNS name again, and the
+# task then deleted itself having achieved nothing.
+#
+# Fixed by not depending on any of that. Terraform already knows the
+# instance name, so it is passed in and the certificate is issued
+# explicitly under it. No reboot, no race, no scheduled task.
 
-Note "hostname at bootstrap=$env:COMPUTERNAME"
+$certName = '${vm_name}'
+Note "certificate name target=$certName netbios=$env:COMPUTERNAME"
 
-function Reset-RdpCertificate {
+# Align the DNS hostname too, so the machine is internally consistent and
+# anything else that reads it (and any certificate Windows reissues later
+# on its own) gets the right name.
+try {
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'Hostname' -Value $certName -ErrorAction Stop
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'NV Hostname' -Value $certName -ErrorAction Stop
+    Note "dns hostname set to $certName"
+} catch { Note "WARN dns hostname update failed: $($_.Exception.Message)" }
+
+try {
+    # Drop whatever TermService issued for itself on first start.
     Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash' -ErrorAction SilentlyContinue
-    Restart-Service TermService -Force -ErrorAction SilentlyContinue
-}
 
-try {
-    Reset-RdpCertificate
-    Start-Sleep -Seconds 5
-    $newCert = Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($newCert) {
-        Note "rdp certificate subject=$($newCert.Subject)"
+    # Legacy SChannel CSP rather than CNG: it puts the private key in
+    # MachineKeys as a file, which is what makes the ACL grant below
+    # possible at all.
+    $cert = New-SelfSignedCertificate -Subject "CN=$certName" -DnsName $certName `
+        -CertStoreLocation 'Cert:\LocalMachine\My' `
+        -Provider 'Microsoft RSA SChannel Cryptographic Provider' `
+        -KeyExportPolicy NonExportable -KeySpec KeyExchange `
+        -KeyLength 2048 -HashAlgorithm SHA256 `
+        -NotAfter (Get-Date).AddYears(1) `
+        -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.1') `
+        -ErrorAction Stop
+
+    # TermService runs as NETWORK SERVICE and cannot present a key it
+    # cannot read. Granted by well-known SID, never by name: the image is
+    # German, where this account is "NT-AUTORITAET\NETZWERKDIENST".
+    if ($cert.PrivateKey -and $cert.PrivateKey.CspKeyContainerInfo) {
+        $keyFile = Join-Path "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys" $cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName
+        $acl = Get-Acl -Path $keyFile
+        $sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-20')
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'Read', 'Allow')))
+        Set-Acl -Path $keyFile -AclObject $acl
+        Note "private key readable by NETWORK SERVICE"
     } else {
-        Note "rdp certificate not yet regenerated (TermService will issue one on demand)"
+        Note "WARN private key file not found - TermService may reject the certificate"
     }
-} catch { Note "rdp certificate reset failed: $($_.Exception.Message)" }
 
-# Run-once startup task. Fires after the rename has taken effect, fixes
-# the certificate only if the subject does not match the final hostname,
-# then unregisters itself so it never runs on a student's machine twice.
-try {
-    $fixDir = 'C:\ProgramData\AppStore'
-    New-Item -ItemType Directory -Path $fixDir -Force | Out-Null
-    $fixPath = Join-Path $fixDir 'rdp-cert-fix.ps1'
-    $fixBody = @"
-`$ErrorActionPreference = 'SilentlyContinue'
-`$cert = Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' | Select-Object -First 1
-if (-not `$cert -or `$cert.Subject -notlike "*`$env:COMPUTERNAME*") {
-    Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' | Remove-Item -Force
-    Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash'
-    Restart-Service TermService -Force
-}
-Unregister-ScheduledTask -TaskName 'AppStore-RdpCertFix' -Confirm:`$false
-"@
-    Set-Content -Path $fixPath -Value $fixBody -Encoding UTF8
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$fixPath`""
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-    Register-ScheduledTask -TaskName 'AppStore-RdpCertFix' -Action $action `
-        -Trigger $trigger -Principal $principal -Force | Out-Null
-    Note "rdp certificate run-once startup task registered"
-} catch { Note "rdp cert startup task failed: $($_.Exception.Message)" }
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash' `
+        -Value $cert.GetCertHash() -Type Binary -ErrorAction Stop
+
+    Restart-Service TermService -Force -ErrorAction Stop
+    Start-Sleep -Seconds 5
+
+    # Read back what is actually bound rather than trusting the write:
+    # a certificate TermService silently refused looks identical from
+    # here otherwise, and the student is the one who would find out.
+    $bound = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SSLCertificateSHA1Hash' -ErrorAction Stop).SSLCertificateSHA1Hash
+    $boundHex = (($bound | ForEach-Object { $_.ToString('x2') }) -join '').ToUpper()
+    if ($boundHex -eq $cert.Thumbprint.ToUpper()) {
+        Note "rdp certificate bound subject=$($cert.Subject) thumbprint=$($cert.Thumbprint)"
+    } else {
+        Note "WARN rdp certificate mismatch bound=$boundHex expected=$($cert.Thumbprint)"
+    }
+} catch { Note "ERROR rdp certificate: $($_.Exception.Message)" }
 
 # --- 4. Windows activation -------------------------------------------
 # Base image is VOLUME_KMSCLIENT channel; it needs a reachable KMS,
